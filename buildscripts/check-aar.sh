@@ -1,7 +1,8 @@
 #!/bin/bash -e
 
 # Plasma's build: checks that every ABI's FFmpeg in the AAR was configured
-# with the parts scripts/ffmpeg.sh turns back on.
+# with the parts scripts/ffmpeg.sh turns back on, and that every ABI's mpv
+# was built with the passthrough patch (patches/mpv).
 # Usage: ./check-aar.sh [path to the AAR]
 
 aar=${1:-../libmpv/build/outputs/aar/libmpv-release.aar}
@@ -19,5 +20,10 @@ for abi in armeabi-v7a arm64-v8a x86 x86_64; do
 			exit 1
 		fi
 	done
-	echo "$abi: ${flags[*]}"
+	# Only the patched ao_audiotrack looks up this Java method
+	unzip -p "$aar" "jni/$abi/libmpv.so" | strings | grep -q isDirectPlaybackSupported || {
+		echo >&2 "$abi: libmpv.so was built without the passthrough patch"
+		exit 1
+	}
+	echo "$abi: ${flags[*]}, passthrough patch"
 done

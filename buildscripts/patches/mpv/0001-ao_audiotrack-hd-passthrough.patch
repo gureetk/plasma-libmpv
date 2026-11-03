@@ -1,0 +1,187 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gureet <noreply@git.gureet.ca>
+Date: Tue, 3 Nov 2026 04:53:16 +0000
+Subject: [PATCH] ao_audiotrack: pass E-AC-3, TrueHD and DTS-HD through
+
+IEC 61937 has to go out at the rate and on the channels that the spdif
+decoder sets for the format it carries: 192 kHz for E-AC-3 and DTS-HD,
+and 8 channels for TrueHD and DTS-HD MA. ao_audiotrack capped every
+stream at the native output rate and opened every passthrough track in
+stereo, so these formats never matched and were decoded to PCM instead.
+
+- Don't cap spdif formats at the native output rate.
+- Open IEC 61937 with 8 channels as CHANNEL_OUT_7POINT1_SURROUND, and
+  refuse other channel counts.
+- Beyond 48 kHz stereo, ask AudioTrack.isDirectPlaybackSupported (API
+  29 and later) first, and refuse when the output can't take it, so mpv
+  falls back to PCM.
+
+Dolby Digital and DTS at 48 kHz in stereo open as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ audio/out/ao_audiotrack.c | 116 +++++++++++++++++++++++++++++---------
+ 1 file changed, 89 insertions(+), 27 deletions(-)
+
+diff --git a/audio/out/ao_audiotrack.c b/audio/out/ao_audiotrack.c
+index f483ccc..b740495 100644
+--- a/audio/out/ao_audiotrack.c
++++ b/audio/out/ao_audiotrack.c
+@@ -100,6 +100,7 @@ static struct JNIAudioTrack {
+     jmethodID getLatency;
+     jmethodID getMinBufferSize;
+     jmethodID getNativeOutputSampleRate;
++    jmethodID isDirectPlaybackSupportedV29;
+     jint STATE_INITIALIZED;
+     jint PLAYSTATE_STOPPED;
+     jint PLAYSTATE_PAUSED;
+@@ -133,6 +134,7 @@ static const struct MPJniField AudioTrack_mapping[] = {
+     {"getLatency", "()I", MP_JNI_METHOD, OFFSET(getLatency), 1},
+     {"getMinBufferSize", "(III)I", MP_JNI_STATIC_METHOD, OFFSET(getMinBufferSize), 1},
+     {"getNativeOutputSampleRate", "(I)I", MP_JNI_STATIC_METHOD, OFFSET(getNativeOutputSampleRate), 1},
++    {"isDirectPlaybackSupported", "(Landroid/media/AudioFormat;Landroid/media/AudioAttributes;)Z", MP_JNI_STATIC_METHOD, OFFSET(isDirectPlaybackSupportedV29), 0},
+     {"WRITE_BLOCKING", "I", MP_JNI_STATIC_FIELD_AS_INT, OFFSET(WRITE_BLOCKING), 0},
+     {"WRITE_NON_BLOCKING", "I", MP_JNI_STATIC_FIELD_AS_INT, OFFSET(WRITE_NON_BLOCKING), 0},
+     {"STATE_INITIALIZED", "I", MP_JNI_STATIC_FIELD_AS_INT, OFFSET(STATE_INITIALIZED), 1},
+@@ -279,6 +281,67 @@ static const struct {
+ };
+ #undef ENTRY
+ 
++// The AudioFormat for this AudioTrack (API 21 and later), as a local reference.
++static jobject AudioTrack_NewFormat(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    JNIEnv *env = MP_JNI_GET_ENV(ao);
++    jobject tmp = NULL;
++
++    jobject format_builder = MP_JNI_NEW(AudioFormatBuilder.clazz, AudioFormatBuilder.ctor);
++    MP_JNI_EXCEPTION_LOG(ao);
++    tmp = MP_JNI_CALL_OBJECT(format_builder, AudioFormatBuilder.setEncoding, p->format);
++    MP_JNI_LOCAL_FREEP(&tmp);
++    tmp = MP_JNI_CALL_OBJECT(format_builder, AudioFormatBuilder.setSampleRate, p->samplerate);
++    MP_JNI_LOCAL_FREEP(&tmp);
++    tmp = MP_JNI_CALL_OBJECT(format_builder, AudioFormatBuilder.setChannelMask, p->channel_config);
++    MP_JNI_LOCAL_FREEP(&tmp);
++    jobject format = MP_JNI_CALL_OBJECT(format_builder, AudioFormatBuilder.build);
++    MP_JNI_LOCAL_FREEP(&format_builder);
++    return format;
++}
++
++// The AudioAttributes for this AudioTrack (API 21 and later), as a local reference.
++static jobject AudioTrack_NewAttributes(struct ao *ao)
++{
++    JNIEnv *env = MP_JNI_GET_ENV(ao);
++    jobject tmp = NULL;
++
++    jobject attr_builder = MP_JNI_NEW(AudioAttributesBuilder.clazz, AudioAttributesBuilder.ctor);
++    MP_JNI_EXCEPTION_LOG(ao);
++    tmp = MP_JNI_CALL_OBJECT(attr_builder, AudioAttributesBuilder.setUsage, AudioAttributes.USAGE_MEDIA);
++    MP_JNI_LOCAL_FREEP(&tmp);
++    if (ao->set_media_role) {
++        jint content_type = (ao->init_flags & AO_INIT_MEDIA_ROLE_MUSIC) ?
++            AudioAttributes.CONTENT_TYPE_MUSIC : AudioAttributes.CONTENT_TYPE_MOVIE;
++        tmp = MP_JNI_CALL_OBJECT(attr_builder, AudioAttributesBuilder.setContentType, content_type);
++        MP_JNI_LOCAL_FREEP(&tmp);
++    }
++    jobject attr = MP_JNI_CALL_OBJECT(attr_builder, AudioAttributesBuilder.build);
++    MP_JNI_LOCAL_FREEP(&attr_builder);
++    return attr;
++}
++
++// Whether the output can play this AudioTrack's format as it is. Android 10
++// (API 29) and later can tell; before that, creating the AudioTrack decides.
++static bool AudioTrack_isDirectPlaybackSupported(struct ao *ao)
++{
++    JNIEnv *env = MP_JNI_GET_ENV(ao);
++    if (!AudioTrack.isDirectPlaybackSupportedV29)
++        return true;
++
++    jobject format = AudioTrack_NewFormat(ao);
++    jobject attr = AudioTrack_NewAttributes(ao);
++    bool supported = format && attr &&
++        MP_JNI_DO(CallStaticBooleanMethod, AudioTrack.clazz,
++                  AudioTrack.isDirectPlaybackSupportedV29, format, attr);
++    if (MP_JNI_EXCEPTION_LOG(ao) < 0)
++        supported = false;
++    MP_JNI_LOCAL_FREEP(&format);
++    MP_JNI_LOCAL_FREEP(&attr);
++    return supported;
++}
++
+ static int AudioTrack_New(struct ao *ao)
+ {
+     struct priv *p = ao->priv;
+@@ -287,31 +350,8 @@ static int AudioTrack_New(struct ao *ao)
+ 
+     if (AudioTrack.ctorV21) {
+         MP_VERBOSE(ao, "Using API21 initializer\n");
+-        jobject tmp = NULL;
+-
+-        jobject format_builder = MP_JNI_NEW(AudioFormatBuilder.clazz, AudioFormatBuilder.ctor);
+-        MP_JNI_EXCEPTION_LOG(ao);
+-        tmp = MP_JNI_CALL_OBJECT(format_builder, AudioFormatBuilder.setEncoding, p->format);
+-        MP_JNI_LOCAL_FREEP(&tmp);
+-        tmp = MP_JNI_CALL_OBJECT(format_builder, AudioFormatBuilder.setSampleRate, p->samplerate);
+-        MP_JNI_LOCAL_FREEP(&tmp);
+-        tmp = MP_JNI_CALL_OBJECT(format_builder, AudioFormatBuilder.setChannelMask, p->channel_config);
+-        MP_JNI_LOCAL_FREEP(&tmp);
+-        jobject format = MP_JNI_CALL_OBJECT(format_builder, AudioFormatBuilder.build);
+-        MP_JNI_LOCAL_FREEP(&format_builder);
+-
+-        jobject attr_builder = MP_JNI_NEW(AudioAttributesBuilder.clazz, AudioAttributesBuilder.ctor);
+-        MP_JNI_EXCEPTION_LOG(ao);
+-        tmp = MP_JNI_CALL_OBJECT(attr_builder, AudioAttributesBuilder.setUsage, AudioAttributes.USAGE_MEDIA);
+-        MP_JNI_LOCAL_FREEP(&tmp);
+-        if (ao->set_media_role) {
+-            jint content_type = (ao->init_flags & AO_INIT_MEDIA_ROLE_MUSIC) ?
+-                AudioAttributes.CONTENT_TYPE_MUSIC : AudioAttributes.CONTENT_TYPE_MOVIE;
+-            tmp = MP_JNI_CALL_OBJECT(attr_builder, AudioAttributesBuilder.setContentType, content_type);
+-            MP_JNI_LOCAL_FREEP(&tmp);
+-        }
+-        jobject attr = MP_JNI_CALL_OBJECT(attr_builder, AudioAttributesBuilder.build);
+-        MP_JNI_LOCAL_FREEP(&attr_builder);
++        jobject format = AudioTrack_NewFormat(ao);
++        jobject attr = AudioTrack_NewAttributes(ao);
+ 
+         audiotrack = MP_JNI_NEW(
+             AudioTrack.clazz,
+@@ -673,7 +713,10 @@ static int init(struct ao *ao)
+         p->format = AudioFormat.ENCODING_PCM_16BIT;
+     }
+ 
+-    if (AudioTrack.getNativeOutputSampleRate) {
++    // IEC 61937 has to go out at the rate the spdif decoder chose for the
++    // format it carries: 192 kHz for E-AC-3, TrueHD and DTS-HD. Capped at the
++    // native output rate, it no longer matches, and mpv decodes it instead.
++    if (!af_fmt_is_spdif(ao->format) && AudioTrack.getNativeOutputSampleRate) {
+         jint samplerate = MP_JNI_CALL_STATIC_INT(
+             AudioTrack.clazz,
+             AudioTrack.getNativeOutputSampleRate,
+@@ -711,7 +754,26 @@ static int init(struct ao *ao)
+     };
+     static_assert(MP_ARRAY_SIZE(layout_map) == MP_ARRAY_SIZE(layouts), "");
+     if (p->format == AudioFormat.ENCODING_IEC61937) {
+-        p->channel_config = AudioFormat.CHANNEL_OUT_STEREO;
++        // IEC 61937 is carried on 2 channels, or on 8 for the high bit rate
++        // formats (TrueHD and DTS-HD MA), as the spdif decoder lays it out.
++        if (ao->channels.num == 2) {
++            p->channel_config = AudioFormat.CHANNEL_OUT_STEREO;
++        } else if (ao->channels.num == 8 && AudioFormat.CHANNEL_OUT_7POINT1_SURROUND) {
++            p->channel_config = AudioFormat.CHANNEL_OUT_7POINT1_SURROUND;
++        } else {
++            MP_ERR(ao, "spdif passthrough over %d channels not supported\n",
++                   ao->channels.num);
++            goto error;
++        }
++        // Beyond 48 kHz stereo, ask first, so that an output that can't take
++        // it is refused here and mpv falls back to PCM.
++        if ((p->samplerate > 48000 || ao->channels.num > 2) &&
++            !AudioTrack_isDirectPlaybackSupported(ao))
++        {
++            MP_ERR(ao, "this output can't pass %s through (%d Hz, %d channels)\n",
++                   af_fmt_to_str(ao->format), p->samplerate, ao->channels.num);
++            goto error;
++        }
+     } else {
+         struct mp_chmap_sel sel = {0};
+         for (int i = 0; i < MP_ARRAY_SIZE(layouts); i++) {
