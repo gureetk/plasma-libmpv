@@ -1,32 +1,56 @@
 name: Publish
 
-# Plasma's build: a tag v<libmpvVersion> builds the AAR and publishes it on
-# this repository's releases page as libmpv-<version>.aar with SHA256SUMS.
-# Nothing goes to Maven Central.
+# Plasma's build: builds the AAR and publishes it on this repository's
+# releases page as libmpv-<version>.aar with SHA256SUMS, under the tag
+# v<libmpvVersion> from gradle.properties. Either push that tag, or run this
+# workflow by hand on main (Actions › Publish › Run workflow), and it makes
+# the tag itself, at the commit it built. Nothing goes to Maven Central.
 
 on:
   push:
     tags:
       - v*
+  workflow_dispatch:
+
+# One release at a time, so two runs can't both make the same one
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 jobs:
   publish:
     name: Publish
     runs-on: ubuntu-latest
-    if: ${{ contains(github.repository_owner, 'jarnedemeulemeester') || startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
     permissions:
       contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      # Before the long build: the tag has to be v<libmpvVersion> from
-      # gradle.properties, and that version has to start with mpv's.
+      # Before the long build: the tag is v<libmpvVersion> from
+      # gradle.properties, and that version has to start with mpv's. A run by
+      # hand makes the tag, so it has to be on main and the tag must not exist.
       - name: Check the tag
         run: |
           version=$(sed -n 's/^libmpvVersion=//p' gradle.properties)
           . buildscripts/include/depinfo.sh
-          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+          tag="v$version"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            if [ "$GITHUB_REF" != refs/heads/main ]; then
+              echo "::error::Run it on main, not $GITHUB_REF_NAME"
+              exit 1
+            fi
+            found=0
+            git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null || found=$?
+            if [ "$found" -eq 0 ]; then
+              echo "::error::$tag already exists. For a new release, raise libmpvVersion in gradle.properties."
+              exit 1
+            elif [ "$found" -ne 2 ]; then
+              echo "::error::Couldn't check whether $tag exists"
+              exit 1
+            fi
+          elif [ "$GITHUB_REF_NAME" != "$tag" ]; then
             echo "::error::The tag $GITHUB_REF_NAME doesn't match libmpvVersion=$version in gradle.properties"
             exit 1
           fi
@@ -39,6 +63,7 @@ jobs:
           esac
           {
             echo "VERSION=$version"
+            echo "TAG=$tag"
             echo "MPV_VERSION=$v_mpv"
             echo "FFMPEG_VERSION=$v_ffmpeg"
           } >> "$GITHUB_ENV"
@@ -90,12 +115,15 @@ jobs:
           {
             echo "mpv $MPV_VERSION and FFmpeg $FFMPEG_VERSION, built for Plasma."
             echo
-            echo "What differs from upstream's build is in the [README](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/README.md). \`SHA256SUMS\` has the AAR's SHA-256."
+            echo "What differs from upstream's build is in the [README](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/README.md). \`SHA256SUMS\` has the AAR's SHA-256."
           } > release-notes.md
 
+      # Makes the tag at the commit built, when the run was started by hand
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
           draft: false
           fail_on_unmatched_files: true
           body_path: release-notes.md
