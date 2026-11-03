@@ -23,6 +23,11 @@ cpu=armv7-a
 cpuflags=
 [[ "$ndk_triple" == "arm"* ]] && cpuflags="$cpuflags -mfpu=neon -mcpu=cortex-a8"
 
+# Plasma's build turns three parts back on after the blanket disables below
+# (configure reads its options in order, so they have to come after them):
+#   ac3 encoder   mpv's lavcac3enc filter (Encode Surround to Dolby Digital)
+#   spdif muxer   mpv's spdif decoder, which wraps passthrough audio in IEC 61937
+#   bwdif filter  mpv's deinterlacer for software and copy-back decoding
 ../configure \
 	--target-os=android --enable-cross-compile --cross-prefix=$ndk_triple- --cc=$CC \
 	--arch=${ndk_triple%%-*} --cpu=$cpu --pkg-config=pkg-config --nm=llvm-nm \
@@ -31,7 +36,16 @@ cpuflags=
 	--disable-static --enable-shared --enable-{gpl,version3} \
 	--disable-{stripping,doc,programs} \
 	--disable-{muxers,encoders,devices,filters} \
+	--enable-encoder=ac3 --enable-muxer=spdif --enable-filter=bwdif \
 	--disable-v4l2-m2m
+
+# Stop here rather than build without one of them
+for component in AC3_ENCODER SPDIF_MUXER BWDIF_FILTER; do
+	grep -qx "#define CONFIG_$component 1" config_components.h || {
+		echo >&2 "FFmpeg's configure left out $component"
+		exit 1
+	}
+done
 
 make -j$cores
 make DESTDIR="$prefix_dir" install
