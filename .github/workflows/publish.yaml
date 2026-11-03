@@ -111,7 +111,8 @@ jobs:
         run: |
           mkdir release
           cp libmpv/build/outputs/aar/libmpv-release.aar "release/libmpv-$VERSION.aar"
-          (cd release && sha256sum "libmpv-$VERSION.aar" > SHA256SUMS && cat SHA256SUMS)
+          .github/scripts/ivy-xml.sh "$VERSION" > "release/ivy-$VERSION.xml"
+          (cd release && sha256sum "libmpv-$VERSION.aar" "ivy-$VERSION.xml" > SHA256SUMS && cat SHA256SUMS)
           {
             echo "mpv $MPV_VERSION and FFmpeg $FFMPEG_VERSION, built for Plasma."
             echo
@@ -129,4 +130,5 @@ jobs:
           body_path: release-notes.md
           files: |
             release/libmpv-${{ env.VERSION }}.aar
+            release/ivy-${{ env.VERSION }}.xml
             release/SHA256SUMS

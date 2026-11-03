@@ -1,0 +1,52 @@
+name: Add the Ivy file
+
+# Plasma's build: adds ivy-<version>.xml (.github/scripts/ivy-xml.sh) to a
+# release made before publish.yaml wrote one. It only adds that file: it
+# stops if the release doesn't exist, has no AAR, or already has the file.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The release's version, without the v (for example 0.41.0-plasma.1)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  ivy-file:
+    name: Add the Ivy file
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Add the Ivy file to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          case "$VERSION" in
+            "" | *[!0-9A-Za-z.-]*)
+              echo "::error::Not a version: $VERSION"
+              exit 1
+              ;;
+          esac
+          tag="v$VERSION"
+          file="ivy-$VERSION.xml"
+          if ! assets=$(gh release view "$tag" --json assets --jq '.assets[].name'); then
+            echo "::error::There's no release $tag"
+            exit 1
+          fi
+          if ! grep -qx "libmpv-$VERSION.aar" <<< "$assets"; then
+            echo "::error::$tag has no libmpv-$VERSION.aar"
+            exit 1
+          fi
+          if grep -qx "$file" <<< "$assets"; then
+            echo "::error::$tag already has $file"
+            exit 1
+          fi
+          .github/scripts/ivy-xml.sh "$VERSION" > "$file"
+          cat "$file"
+          gh release upload "$tag" "$file"
