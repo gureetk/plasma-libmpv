@@ -40,10 +40,9 @@ android {
     }
 }
 
+// Plasma's build is released on GitHub (see .github/workflows/publish.yaml),
+// not on Maven Central, so there's no publishToMavenCentral or signing here.
 mavenPublishing {
-    publishToMavenCentral(automaticRelease = true)
-    signAllPublications()
-
     configure(
         platform = AndroidSingleVariantLibrary(
             javadocJar = JavadocJar.Empty(),
@@ -52,21 +51,29 @@ mavenPublishing {
         )
     )
 
+    // The package and namespace stay dev.jdtech.mpv, so the JNI names and
+    // the MPVLib API are the same as upstream's; only the coordinates change.
     coordinates(
-        groupId = "dev.jdtech.mpv",
+        groupId = "ca.gureet.plasma",
         artifactId = "libmpv",
-        version = "1.0.0"
+        version = providers.gradleProperty("libmpvVersion").get()
     )
 
     pom {
-        name = "libmpv-android"
-        description = "libmpv for Android"
+        name = "plasma-libmpv"
+        description = "libmpv for Android, built for Plasma"
         inceptionYear = "2023"
-        url = "https://github.com/jarnedemeulemeester/libmpv-android"
+        url = "https://github.com/gureetk/plasma-libmpv"
         licenses {
+            // FFmpeg and mpv are built with --enable-gpl --enable-version3
+            license {
+                name = "GNU General Public License v3.0 or later"
+                url = "https://www.gnu.org/licenses/gpl-3.0.html"
+            }
+            // the JNI wrapper and build scripts
             license {
                 name = "MIT license"
-                url = "https://github.com/jarnedemeulemeester/libmpv-android/blob/main/LICENSE"
+                url = "https://github.com/gureetk/plasma-libmpv/blob/main/LICENSE"
             }
         }
         developers {
@@ -77,13 +84,9 @@ mavenPublishing {
             }
         }
         scm {
-            url = "https://github.com/jarnedemeulemeester/libmpv-android.git"
-            connection = "scm:git@github.com:jarnedemeulemeester/libmpv-android.git"
-            developerConnection = "scm:git@github.com:jarnedemeulemeester/libmpv-android.git"
-        }
-        issueManagement {
-            system = "GitHub"
-            url = "https://github.com/jarnedemeulemeester/libmpv-android/issues"
+            url = "https://github.com/gureetk/plasma-libmpv.git"
+            connection = "scm:git@github.com:gureetk/plasma-libmpv.git"
+            developerConnection = "scm:git@github.com:gureetk/plasma-libmpv.git"
         }
     }
 }
